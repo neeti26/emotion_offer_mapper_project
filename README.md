@@ -54,7 +54,6 @@ Run with a small test dataset:
 python app.py --input sample_100.csv
 
 📑 Git Setup
-
 This repo uses .gitignore and .gitattributes to keep the codebase clean:
 
 .gitignore (ignores temporary and unnecessary files)
@@ -65,8 +64,6 @@ __pycache__/
 *.sqlite3
 .env
 .DS_Store
-*.csv
-<img width="1080" height="437" alt="image" src="https://github.com/user-attachments/assets/d02ef5f1-2979-439a-af60-ffd73f6223eb" />
-
+<img width="1080" height="437" alt="image" src="https://github.com/user-attachments/assets/f0049946-2bb6-41c5-8af1-ca2ab9bdb0f0" />
 
 
