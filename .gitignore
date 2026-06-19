@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.DS_Store
+.vscode/
+emotion-mapper-app/.next/
+emotion-mapper-app/node_modules/
+emotion-mapper-app/.env.local
+emotion-mapper-app/.vercel/
