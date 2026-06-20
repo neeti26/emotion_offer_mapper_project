@@ -148,7 +148,9 @@ export async function POST(req: NextRequest) {
               allScores: allScores.map(s => ({ label: s.label, score: Math.round(s.score * 100) })),
               ...cfg,
             };
-          } catch {
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            console.error('[api/analyze] classify error', { message: trimmed, err: errMsg });
             return {
               id: i + idx,
               message: msg,
@@ -157,6 +159,7 @@ export async function POST(req: NextRequest) {
               allScores: [],
               ...DEFAULT_CONFIG,
               offer: 'Unable to analyze — please retry',
+              analysisError: errMsg,
             };
           }
         })
