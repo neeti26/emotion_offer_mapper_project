@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import IORedis from 'ioredis';
+// Redis removed per user request; in-memory cache only
 // Simple in-memory progress store for short-lived progress polling
 const progressMap: Map<string, { total: number; processed: number; updatedAt: number }> = new Map();
 
@@ -85,29 +85,7 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
   const CACHE_MAX = 500;
   if (localCache.has(text)) return localCache.get(text)!;
 
-  // Try shared Redis cache first (if enabled)
-  const cacheKey = `hf_cache:${Buffer.from(text).toString('base64')}`;
-  if (redis) {
-    try {
-      const cached = await redis.get(cacheKey);
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        localCache.set(text, parsed);
-        // telemetry: cache hit + record recent sample
-        try {
-          await redis.incr('metrics:cache_hits');
-          const sample = JSON.stringify({ id: cacheKey, label: parsed.label ?? null, ts: Date.now() });
-          await redis.lpush('metrics:recent', sample);
-          await redis.ltrim('metrics:recent', 0, 49);
-        } catch (e) {
-          console.warn('[api/analyze] redis telemetry write failed', e);
-        }
-        return parsed;
-      }
-    } catch (e) {
-      console.warn('[api/analyze] redis get failed', e);
-    }
-  }
+  // No Redis: rely on in-memory cache only
 
   const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
 
@@ -164,15 +142,7 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
       } catch (e) {
         // ignore cache set errors
       }
-      // store in Redis for shared caching (ttl 1 day) and increment hf call metric
-      if (redis) {
-        try {
-          await redis.set(cacheKey, JSON.stringify(out), 'EX', 60 * 60 * 24);
-          await redis.incr('metrics:hf_calls');
-        } catch (e) {
-          console.warn('[api/analyze] redis set/incr failed', e);
-        }
-      }
+      // no Redis configured — rely on in-memory cache only
       return out;
     } catch (err: unknown) {
       clearTimeout(timeout);
@@ -216,28 +186,7 @@ async function classifyBatch(texts: string[], hfToken: string): Promise<Array<{ 
   // first try to satisfy from local cache or redis
   const results: Array<{ label: string; score: number; allScores: { label: string; score: number }[] } | null> = texts.map(t => localCache.has(t) ? localCache.get(t)! : null);
 
-  // check redis for missing
-  const missingIdxs: number[] = [];
-  const missingTexts: string[] = [];
-  for (let i = 0; i < texts.length; i++) if (!results[i]) { missingIdxs.push(i); missingTexts.push(texts[i]); }
-
-  if (missingTexts.length > 0 && redis) {
-    try {
-      const keys = missingTexts.map(t => `hf_cache:${Buffer.from(t).toString('base64')}`);
-      const vals = await redis.mget(...keys);
-      for (let j = 0; j < vals.length; j++) {
-        const v = vals[j];
-        if (v) {
-          const parsed = JSON.parse(v);
-          const idx = missingIdxs[j];
-          results[idx] = parsed;
-          localCache.set(texts[idx], parsed);
-        }
-      }
-    } catch (e) {
-      console.warn('[api/analyze] redis mget failed', e);
-    }
-  }
+  // No Redis: proceed to call HF for missing texts
 
   // recompute still-missing
   const toCallIdxs: number[] = [];
@@ -292,7 +241,6 @@ async function classifyBatch(texts: string[], hfToken: string): Promise<Array<{ 
             if (cacheObj.order.length > CACHE_MAX) {
               const oldest = cacheObj.order.shift(); if (oldest) localCache.delete(oldest);
             }
-            if (redis) await redis.set(`hf_cache:${Buffer.from(texts[idx]).toString('base64')}`, JSON.stringify(out), 'EX', 60 * 60 * 24);
           } catch (e) { /* ignore cache errors */ }
         }
         break; // success
@@ -342,17 +290,7 @@ function fallbackClassify(text: string) {
   return { label: 'unknown', score: 0.25, allScores: [] };
 }
 
-// Optional Redis client for shared caching and telemetry. Set `REDIS_URL` in env to enable.
-const redisUrl = process.env.REDIS_URL ?? '';
-let redis: any = null;
-if (redisUrl) {
-  try {
-    redis = new IORedis(redisUrl);
-  } catch (e) {
-    console.warn('[api/analyze] failed to initialize Redis', e);
-    redis = null;
-  }
-}
+// Redis removed per user request; using in-memory cache only
 
 /* ── POST /api/analyze ── */
 export async function POST(req: NextRequest) {
