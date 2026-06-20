@@ -241,13 +241,21 @@ export async function POST(req: NextRequest) {
     }
 
     const hfToken = process.env.HF_TOKEN ?? '';
-    const BATCH = 10;
+    const BATCH = parseInt(process.env.ANALYZE_BATCH_SIZE || '16', 10);
+    const CONCURRENCY = parseInt(process.env.ANALYZE_CONCURRENCY || '3', 10);
     const results: any[] = [];
 
-    for (let i = 0; i < messages.length; i += BATCH) {
-      const chunk = messages.slice(i, i + BATCH);
-      const chunkResults = await Promise.all(
-        chunk.map(async (msg, idx) => {
+    // create chunks
+    const chunks: string[][] = [];
+    for (let i = 0; i < messages.length; i += BATCH) chunks.push(messages.slice(i, i + BATCH));
+
+    // simple concurrency pool for chunk processing
+    async function runWorker(poolIndex: number) {
+      for (let i = poolIndex; i < chunks.length; i += CONCURRENCY) {
+        const chunk = chunks[i];
+        const baseIdx = i * BATCH;
+        const chunkResults = await Promise.all(
+          chunk.map(async (msg, idx) => {
           const trimmed = (msg ?? '').toString().trim();
           if (!trimmed) {
             return {
@@ -263,7 +271,7 @@ export async function POST(req: NextRequest) {
             const { label, score, allScores } = await classifyEmotion(trimmed.slice(0, 512), hfToken);
             const cfg = EMOTION_CONFIG[label.toLowerCase()] ?? DEFAULT_CONFIG;
             return {
-              id: i + idx,
+              id: baseIdx + idx,
               message: msg,
               emotion: label.toLowerCase(),
               confidence: Math.round(score * 100),
@@ -297,9 +305,15 @@ export async function POST(req: NextRequest) {
             };
           }
         })
-      );
-      results.push(...chunkResults);
+        );
+        results.push(...chunkResults.map((r:any, j:number)=> ({ ...r, id: baseIdx + j })));
+      }
     }
+
+    // launch workers
+    const workers: Promise<void>[] = [];
+    for (let w = 0; w < Math.min(CONCURRENCY, chunks.length); w++) workers.push(runWorker(w));
+    await Promise.all(workers);
 
     // Aggregated stats
     const emotionCounts: Record<string, number> = {};
