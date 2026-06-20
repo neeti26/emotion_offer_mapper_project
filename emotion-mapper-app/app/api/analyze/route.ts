@@ -160,22 +160,14 @@ export async function POST(req: NextRequest) {
     }
 
     const hfToken = process.env.HF_TOKEN ?? '';
-    if (!hfToken) {
-      return NextResponse.json(
-        { error: 'HuggingFace API token not configured. Set HF_TOKEN in environment variables.' },
-        { status: 500 }
-      );
-    }
-
-    // Process in parallel batches of 10 to respect rate limits
     const BATCH = 10;
-    const results = [];
+    const results: any[] = [];
 
     for (let i = 0; i < messages.length; i += BATCH) {
       const chunk = messages.slice(i, i + BATCH);
       const chunkResults = await Promise.all(
         chunk.map(async (msg, idx) => {
-          const trimmed = String(msg ?? '').trim();
+          const trimmed = (msg ?? '').toString().trim();
           if (!trimmed) {
             return {
               id: i + idx,
@@ -200,17 +192,22 @@ export async function POST(req: NextRequest) {
           } catch (err: unknown) {
             const errMsg = err instanceof Error ? err.message : String(err);
             console.error('[api/analyze] classify error', { message: trimmed, err: errMsg });
+            const fb = fallbackClassify(trimmed.slice(0, 512));
+            const cfg = EMOTION_CONFIG[fb.label.toLowerCase()] ?? DEFAULT_CONFIG;
             return {
               id: i + idx,
               message: msg,
-              emotion: 'error',
-              confidence: 0,
-              allScores: [],
-              ...DEFAULT_CONFIG,
-              offer: 'Unable to analyze — please retry',
+              emotion: fb.label.toLowerCase(),
+              confidence: Math.round(fb.score * 100),
+              allScores: fb.allScores.map(s => ({ label: s.label, score: Math.round(s.score * 100) })),
+              ...cfg,
               analysisError: errMsg,
+              fallback: true,
             };
           }
+        })
+      );
+      results.push(...chunkResults);
         })
       );
       results.push(...chunkResults);
