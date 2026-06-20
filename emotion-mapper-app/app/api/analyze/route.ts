@@ -208,9 +208,6 @@ export async function POST(req: NextRequest) {
         })
       );
       results.push(...chunkResults);
-        })
-      );
-      results.push(...chunkResults);
     }
 
     // Aggregated stats
