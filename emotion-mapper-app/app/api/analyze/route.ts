@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import IORedis from 'ioredis';
+// Simple in-memory progress store for short-lived progress polling
+const progressMap: Map<string, { total: number; processed: number; updatedAt: number }> = new Map();
 
 // Emotion → color, emoji, offer mapping
 export const EMOTION_CONFIG: Record<string, {
@@ -231,7 +233,7 @@ if (redisUrl) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { messages }: { messages: string[] } = body;
+    const { messages, clientId }: { messages: string[]; clientId?: string } = body;
 
     if (!Array.isArray(messages) || messages.length === 0) {
       return NextResponse.json({ error: 'messages array is required and must not be empty.' }, { status: 400 });
@@ -244,6 +246,11 @@ export async function POST(req: NextRequest) {
     const BATCH = parseInt(process.env.ANALYZE_BATCH_SIZE || '16', 10);
     const CONCURRENCY = parseInt(process.env.ANALYZE_CONCURRENCY || '3', 10);
     const results: any[] = [];
+
+    // initialize progress tracking if clientId provided
+    if (clientId) {
+      progressMap.set(clientId, { total: messages.length, processed: 0, updatedAt: Date.now() });
+    }
 
     // create chunks
     const chunks: string[][] = [];
@@ -307,6 +314,15 @@ export async function POST(req: NextRequest) {
         })
         );
         results.push(...chunkResults.map((r:any, j:number)=> ({ ...r, id: baseIdx + j })));
+        // update progress map after finishing this chunk
+        if (clientId) {
+          const e = progressMap.get(clientId);
+          if (e) {
+            e.processed = Math.min(e.total, e.processed + chunk.length);
+            e.updatedAt = Date.now();
+            progressMap.set(clientId, e);
+          }
+        }
       }
     }
 
@@ -328,6 +344,21 @@ export async function POST(req: NextRequest) {
   } catch (err: unknown) {
     console.error('[/api/analyze]', err);
     const message = err instanceof Error ? err.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+export async function GET(req: NextRequest) {
+  try {
+    const url = new URL(req.url);
+    const clientId = url.searchParams.get('clientId');
+    if (!clientId) return NextResponse.json({ error: 'clientId is required' }, { status: 400 });
+    const entry = progressMap.get(clientId);
+    if (!entry) return NextResponse.json({ found: false, total: 0, processed: 0, percent: 0 });
+    const percent = entry.total > 0 ? Math.round((entry.processed / entry.total) * 100) : 0;
+    return NextResponse.json({ found: true, total: entry.total, processed: entry.processed, percent });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Unknown';
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

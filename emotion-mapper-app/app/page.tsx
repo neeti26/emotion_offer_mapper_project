@@ -415,18 +415,36 @@ function AnalyzeView({ onResults }: { onResults: (r: ApiResponse) => void }) {
     if (!msgs[0]) { setError('No messages to analyze.'); return; }
     if (msgs.length > 500) { setError('Max 500 messages per batch.'); return; }
     setError(''); setLoading(true); setProgress(8);
+    // generate client id for progress polling
+    const clientId = `c_${Date.now().toString(36)}_${Math.floor(Math.random()*10000).toString(36)}`;
     const tick = setInterval(() => setProgress(p => Math.min(p + 6, 80)), 600);
+    let pollHandle: number | null = null;
+    const startPolling = () => {
+      pollHandle = window.setInterval(async () => {
+        try {
+          const res = await fetch(`/api/analyze?clientId=${encodeURIComponent(clientId)}`);
+          if (!res.ok) return;
+          const json = await res.json();
+          if (json && json.found) {
+            setProgress(Math.max(5, Math.min(98, json.percent)));
+          }
+        } catch (e) { /* ignore */ }
+      }, 700);
+    };
     try {
       const res = await fetch('/api/analyze', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: msgs }),
+        body: JSON.stringify({ messages: msgs, clientId }),
       });
+      startPolling();
       const data: ApiResponse = await res.json();
       clearInterval(tick); setProgress(100);
+      if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
       if (!res.ok || data.error) { setError(data.error ?? 'Analysis failed. Is HF_TOKEN set?'); }
       else { onResults(data); }
     } catch (e: unknown) {
       clearInterval(tick);
+      if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
       setError(e instanceof Error ? e.message : 'Network error');
     } finally {
       setLoading(false);
