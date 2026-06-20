@@ -72,7 +72,21 @@ When Redis is configured, the server will:
 - Increment `metrics:hf_calls` each time a HF call result is cached
 - Increment `metrics:fallbacks` each time the local keyword fallback is used
 
+Additional telemetry recorded when Redis is enabled:
+- `metrics:cache_hits` — times a cached result was returned (reduces HF calls)
+- `metrics:recent` — list of recent cached sample entries (up to 50 entries)
+
 You can view metrics via the included dashboard at `/metrics` or call `GET /api/metrics`.
+
+### Enabling automated deploys (CI → Vercel)
+
+The included GitHub Actions workflow builds the app on push/PR. To enable automatic deploys from CI, add the following repository secrets in GitHub and uncomment the deploy step in `.github/workflows/ci.yml`:
+
+- `VERCEL_TOKEN` — Vercel personal token (keep secret)
+- `VERCEL_ORG_ID` — Vercel organization id
+- `VERCEL_PROJECT_ID` — Vercel project id
+
+After adding these, uncomment the `deploy` job in the workflow. The CI deploys will then run `vercel --prod` using the provided token.
 ---
 
 ## Local Development

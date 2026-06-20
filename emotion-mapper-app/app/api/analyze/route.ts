@@ -84,6 +84,15 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
       if (cached) {
         const parsed = JSON.parse(cached);
         localCache.set(text, parsed);
+        // telemetry: cache hit + record recent sample
+        try {
+          await redis.incr('metrics:cache_hits');
+          const sample = JSON.stringify({ id: cacheKey, label: parsed.label ?? null, ts: Date.now() });
+          await redis.lpush('metrics:recent', sample);
+          await redis.ltrim('metrics:recent', 0, 49);
+        } catch (e) {
+          console.warn('[api/analyze] redis telemetry write failed', e);
+        }
         return parsed;
       }
     } catch (e) {
