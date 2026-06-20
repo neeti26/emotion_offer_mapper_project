@@ -200,6 +200,129 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
   throw new Error('unreachable');
 }
 
+// Batch classify multiple texts in a single HF request to reduce HTTP overhead
+async function classifyBatch(texts: string[], hfToken: string): Promise<Array<{ label: string; score: number; allScores: { label: string; score: number }[] }>> {
+  const url = process.env.HF_API_URL ?? 'https://api-inference.huggingface.co/models/bhadresh-savani/distilbert-base-uncased-emotion';
+  const MAX_RETRIES = 4;
+  const BASE_DELAY = 500;
+
+  // reuse the same in-memory cache used by classifyEmotion
+  const cacheObj = (classifyEmotion as any)._cache ||= { map: new Map<string, { label: string; score: number; allScores: { label: string; score: number }[] }>(), order: [] as string[] };
+  const localCache = cacheObj.map;
+  const CACHE_MAX = 500;
+
+  // first try to satisfy from local cache or redis
+  const results: Array<{ label: string; score: number; allScores: { label: string; score: number }[] } | null> = texts.map(t => localCache.has(t) ? localCache.get(t)! : null);
+
+  // check redis for missing
+  const missingIdxs: number[] = [];
+  const missingTexts: string[] = [];
+  for (let i = 0; i < texts.length; i++) if (!results[i]) { missingIdxs.push(i); missingTexts.push(texts[i]); }
+
+  if (missingTexts.length > 0 && redis) {
+    try {
+      const keys = missingTexts.map(t => `hf_cache:${Buffer.from(t).toString('base64')}`);
+      const vals = await redis.mget(...keys);
+      for (let j = 0; j < vals.length; j++) {
+        const v = vals[j];
+        if (v) {
+          const parsed = JSON.parse(v);
+          const idx = missingIdxs[j];
+          results[idx] = parsed;
+          localCache.set(texts[idx], parsed);
+        }
+      }
+    } catch (e) {
+      console.warn('[api/analyze] redis mget failed', e);
+    }
+  }
+
+  // recompute still-missing
+  const toCallIdxs: number[] = [];
+  const toCallTexts: string[] = [];
+  for (let i = 0; i < texts.length; i++) if (!results[i]) { toCallIdxs.push(i); toCallTexts.push(texts[i]); }
+
+  if (toCallTexts.length > 0) {
+    const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      const controller = new AbortController();
+      const timeoutMs = 12000 + (attempt - 1) * 4000;
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${hfToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ inputs: toCallTexts, parameters: { return_all_scores: true } }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => '');
+          const status = res.status;
+          if (([429, 502, 503, 504].includes(status) || status === 0) && attempt < MAX_RETRIES) {
+            const delay = BASE_DELAY * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 300);
+            console.warn(`[api/analyze] HF batch transient ${status} (attempt ${attempt}), retrying in ${delay}ms`);
+            await sleep(delay);
+            continue;
+          }
+          throw new Error(`HF status ${status}: ${errBody}`);
+        }
+        const data = await res.json();
+        // data should be an array where each item is array of scores
+        const responses = Array.isArray(data) && Array.isArray(data[0]) ? data as any[] : (Array.isArray(data) ? data : []);
+        for (let k = 0; k < toCallIdxs.length; k++) {
+          const idx = toCallIdxs[k];
+          const item = responses[k];
+          if (!item || !Array.isArray(item) || item.length === 0) {
+            results[idx] = { label: 'unknown', score: 0.25, allScores: [] };
+            continue;
+          }
+          const scores = item.sort((a: any, b: any) => b.score - a.score);
+          const out = { label: scores[0].label, score: scores[0].score, allScores: scores };
+          results[idx] = out;
+          // set caches
+          try {
+            localCache.set(texts[idx], out);
+            cacheObj.order.push(texts[idx]);
+            if (cacheObj.order.length > CACHE_MAX) {
+              const oldest = cacheObj.order.shift(); if (oldest) localCache.delete(oldest);
+            }
+            if (redis) await redis.set(`hf_cache:${Buffer.from(texts[idx]).toString('base64')}`, JSON.stringify(out), 'EX', 60 * 60 * 24);
+          } catch (e) { /* ignore cache errors */ }
+        }
+        break; // success
+      } catch (err: unknown) {
+        clearTimeout(timeout);
+        const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+        console.error('[api/analyze] HF batch attempt failed', msg);
+        if (attempt < MAX_RETRIES) {
+          const delay = BASE_DELAY * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 500);
+          await sleep(delay);
+          continue;
+        }
+        // on final failure, mark all toCall as fallback
+        for (let k = 0; k < toCallIdxs.length; k++) {
+          const idx = toCallIdxs[k];
+          results[idx] = null; // will be handled as fallback below
+        }
+      }
+    }
+  }
+
+  // fill any nulls with fallback classifier
+  for (let i = 0; i < texts.length; i++) {
+    if (!results[i]) {
+      const fb = fallbackClassify(texts[i]);
+      results[i] = { label: fb.label, score: fb.score, allScores: fb.allScores };
+    }
+  }
+
+  return results as Array<{ label: string; score: number; allScores: { label: string; score: number }[] }>;
+}
+
 // Simple fallback classifier (keyword-based) used if HF is unavailable.
 function fallbackClassify(text: string) {
   const t = text.toLowerCase();
@@ -261,12 +384,14 @@ export async function POST(req: NextRequest) {
       for (let i = poolIndex; i < chunks.length; i += CONCURRENCY) {
         const chunk = chunks[i];
         const baseIdx = i * BATCH;
-        const chunkResults = await Promise.all(
-          chunk.map(async (msg, idx) => {
-          const trimmed = (msg ?? '').toString().trim();
+        // Use batch classification for this chunk to reduce HF HTTP calls
+        const texts = chunk.map(m => (m ?? '').toString().trim().slice(0, 512));
+        const batchRes = await classifyBatch(texts, hfToken);
+        const chunkResults = texts.map((trimmed, idx) => {
+          const msg = chunk[idx];
           if (!trimmed) {
             return {
-              id: i + idx,
+              id: baseIdx + idx,
               message: msg,
               emotion: 'unknown',
               confidence: 0,
@@ -274,46 +399,24 @@ export async function POST(req: NextRequest) {
               ...DEFAULT_CONFIG,
             };
           }
-          try {
-            const { label, score, allScores } = await classifyEmotion(trimmed.slice(0, 512), hfToken);
-            const cfg = EMOTION_CONFIG[label.toLowerCase()] ?? DEFAULT_CONFIG;
-            return {
-              id: baseIdx + idx,
-              message: msg,
-              emotion: label.toLowerCase(),
-              confidence: Math.round(score * 100),
-              allScores: allScores.map(s => ({ label: s.label, score: Math.round(s.score * 100) })),
-              ...cfg,
-            };
-          } catch (err: unknown) {
-            const errMsg = err instanceof Error ? err.message : String(err);
-            console.error('[api/analyze] classify error', { message: trimmed, err: errMsg });
-            // increment fallback telemetry
-            if (redis) {
-              try {
-                await redis.incr('metrics:fallbacks');
-              } catch (e) {
-                console.warn('[api/analyze] redis incr fallback failed', e);
-              }
-            }
-            const fb = fallbackClassify(trimmed.slice(0, 512));
-            const cfg = EMOTION_CONFIG[fb.label.toLowerCase()] ?? DEFAULT_CONFIG;
-            // If fallback returns a reasonably confident label, surface it but don't mark analysisError to avoid alarming UI.
-            const FB_CONF_THRESHOLD = 0.35; // 35% confidence
-            const isGoodFallback = fb.label !== 'unknown' && (fb.score ?? 0) >= FB_CONF_THRESHOLD;
-            return {
-              id: i + idx,
-              message: msg,
-              emotion: fb.label.toLowerCase(),
-              confidence: Math.round(fb.score * 100),
-              allScores: fb.allScores.map(s => ({ label: s.label, score: Math.round(s.score * 100) })),
-              ...cfg,
-              ...(isGoodFallback ? { fallback: true } : { analysisError: errMsg, fallback: true }),
-            };
-          }
-        })
-        );
-        results.push(...chunkResults.map((r:any, j:number)=> ({ ...r, id: baseIdx + j })));
+          const out = batchRes[idx];
+          const label = out.label ?? 'unknown';
+          const score = out.score ?? 0;
+          const allScores = out.allScores ?? [];
+          const cfg = EMOTION_CONFIG[label.toLowerCase()] ?? DEFAULT_CONFIG;
+          // decide whether to expose analysisError: if fallback was used it will be marked as label 'unknown' or low score
+          const isFallback = (out.allScores ?? []).length === 0 || (score <= 0.35);
+          return {
+            id: baseIdx + idx,
+            message: msg,
+            emotion: label.toLowerCase(),
+            confidence: Math.round(score * 100),
+            allScores: allScores.map(s => ({ label: s.label, score: Math.round(s.score * 100) })),
+            ...cfg,
+            ...(isFallback ? { fallback: true } : {}),
+          };
+        });
+        results.push(...chunkResults);
         // update progress map after finishing this chunk
         if (clientId) {
           const e = progressMap.get(clientId);
