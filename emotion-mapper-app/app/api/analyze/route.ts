@@ -173,7 +173,7 @@ function fallbackClassify(text: string) {
 
 // Optional Redis client for shared caching and telemetry. Set `REDIS_URL` in env to enable.
 const redisUrl = process.env.REDIS_URL ?? '';
-let redis: IORedis.Redis | null = null;
+let redis: any = null;
 if (redisUrl) {
   try {
     redis = new IORedis(redisUrl);
