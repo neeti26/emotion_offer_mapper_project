@@ -28,6 +28,7 @@ interface AnalysisResult {
   offer: string;
   priority: string;
   action: string;
+  analysisError?: string;
 }
 
 interface ApiResponse {
@@ -190,7 +191,7 @@ function MetricCard({ label, value, sub, trend, color }: {
 
 // ── ResultTable ────────────────────────────────────────────────────────────────
 
-function ResultTable({ results, onClear }: { results: AnalysisResult[]; onClear: () => void }) {
+function ResultTable({ results, onClear, onRetry }: { results: AnalysisResult[]; onClear: () => void; onRetry: (id: number, message: string) => Promise<void> }) {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
   const [expanded, setExpanded] = useState<number | null>(null);
@@ -355,6 +356,18 @@ function ResultTable({ results, onClear }: { results: AnalysisResult[]; onClear:
                                   <span style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--muted)', width: 32, textAlign: 'right' }}>{s.score}%</span>
                                 </div>
                               ))}
+                            </div>
+                          </div>
+                        )}
+                        {r.analysisError && (
+                          <div style={{ gridColumn: '1 / -1', marginTop: 10 }}>
+                            <div style={{ padding: 10, borderRadius: 7, background: 'rgba(248,113,113,0.06)', border: '1px solid rgba(248,113,113,0.18)', color: '#f87171', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <div style={{ fontSize: 13 }}>Analysis failed: {r.analysisError}</div>
+                              <div style={{ display: 'flex', gap: 8 }}>
+                                <button className="btn btn-ghost" onClick={async (e) => { e.stopPropagation(); await onRetry(r.id, r.message); }}>
+                                  <RefreshCw size={14} /> Retry
+                                </button>
+                              </div>
                             </div>
                           </div>
                         )}
@@ -781,8 +794,34 @@ export default function Home() {
             />
             <div style={{ padding: 24, flex: 1, overflow: 'auto' }}>
               {data ? (
-                <ResultTable results={data.results} onClear={() => { setData(null); setView('analyze'); }} />
-              ) : (
+                  <ResultTable
+                    results={data.results}
+                    onClear={() => { setData(null); setView('analyze'); }}
+                    onRetry={async (id: number, message: string) => {
+                      try {
+                        const res = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [message] }) });
+                        const d: ApiResponse = await res.json();
+                        if (!res.ok || d.error) {
+                          // attach error to the row
+                          setData(prev => prev ? {
+                            ...prev,
+                            results: prev.results.map(r => r.id === id ? { ...r, analysisError: d.error ?? 'Retry failed' } : r)
+                          } : prev);
+                        } else if (d.results && d.results[0]) {
+                          setData(prev => prev ? {
+                            ...prev,
+                            results: prev.results.map(r => r.id === id ? d.results[0] : r)
+                          } : prev);
+                        }
+                      } catch (e) {
+                        setData(prev => prev ? {
+                          ...prev,
+                          results: prev.results.map(r => r.id === id ? { ...r, analysisError: e instanceof Error ? e.message : String(e) } : r)
+                        } : prev);
+                      }
+                    }}
+                  />
+                ) : (
                 <div className="empty-state">
                   <FileText size={28} style={{ opacity: 0.25 }} />
                   <div style={{ fontWeight: 600, color: 'var(--text)' }}>No results yet</div>
