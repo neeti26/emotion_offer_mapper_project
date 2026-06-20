@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import IORedis from 'ioredis';
 
 // Emotion → color, emoji, offer mapping
 export const EMOTION_CONFIG: Record<string, {
@@ -75,6 +76,21 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
   const localCache = (classifyEmotion as any)._cache ||= new Map<string, { label: string; score: number; allScores: { label: string; score: number }[] }>();
   if (localCache.has(text)) return localCache.get(text)!;
 
+  // Try shared Redis cache first (if enabled)
+  const cacheKey = `hf_cache:${Buffer.from(text).toString('base64')}`;
+  if (redis) {
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        localCache.set(text, parsed);
+        return parsed;
+      }
+    } catch (e) {
+      console.warn('[api/analyze] redis get failed', e);
+    }
+  }
+
   const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -111,6 +127,15 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
       scores.sort((a, b) => b.score - a.score);
       const out = { label: scores[0].label, score: scores[0].score, allScores: scores };
       localCache.set(text, out);
+      // store in Redis for shared caching (ttl 1 day) and increment hf call metric
+      if (redis) {
+        try {
+          await redis.set(cacheKey, JSON.stringify(out), 'EX', 60 * 60 * 24);
+          await redis.incr('metrics:hf_calls');
+        } catch (e) {
+          console.warn('[api/analyze] redis set/incr failed', e);
+        }
+      }
       return out;
     } catch (err) {
       clearTimeout(timeout);
@@ -144,6 +169,18 @@ function fallbackClassify(text: string) {
     for (const w of words) if (t.includes(w)) return { label, score: 0.6, allScores: [{ label, score: 0.6 }] };
   }
   return { label: 'unknown', score: 0.25, allScores: [] };
+}
+
+// Optional Redis client for shared caching and telemetry. Set `REDIS_URL` in env to enable.
+const redisUrl = process.env.REDIS_URL ?? '';
+let redis: IORedis.Redis | null = null;
+if (redisUrl) {
+  try {
+    redis = new IORedis(redisUrl);
+  } catch (e) {
+    console.warn('[api/analyze] failed to initialize Redis', e);
+    redis = null;
+  }
 }
 
 /* ── POST /api/analyze ── */
@@ -192,6 +229,14 @@ export async function POST(req: NextRequest) {
           } catch (err: unknown) {
             const errMsg = err instanceof Error ? err.message : String(err);
             console.error('[api/analyze] classify error', { message: trimmed, err: errMsg });
+            // increment fallback telemetry
+            if (redis) {
+              try {
+                await redis.incr('metrics:fallbacks');
+              } catch (e) {
+                console.warn('[api/analyze] redis incr fallback failed', e);
+              }
+            }
             const fb = fallbackClassify(trimmed.slice(0, 512));
             const cfg = EMOTION_CONFIG[fb.label.toLowerCase()] ?? DEFAULT_CONFIG;
             return {
