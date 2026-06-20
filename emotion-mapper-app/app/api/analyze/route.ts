@@ -200,6 +200,8 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
   throw new Error('unreachable');
 }
 
+
+
 // Batch classify multiple texts in a single HF request to reduce HTTP overhead
 async function classifyBatch(texts: string[], hfToken: string): Promise<Array<{ label: string; score: number; allScores: { label: string; score: number }[] }>> {
   const url = process.env.HF_API_URL ?? 'https://api-inference.huggingface.co/models/bhadresh-savani/distilbert-base-uncased-emotion';
@@ -327,12 +329,12 @@ async function classifyBatch(texts: string[], hfToken: string): Promise<Array<{ 
 function fallbackClassify(text: string) {
   const t = text.toLowerCase();
   const buckets: [string[], string][] = [
-    [['angry','furious','outrage','ridiculous','frustrat','hate','broken','ignored','refund'], 'anger'],
-    [['love','in love','ador','amazing','recommend','delighted','gorgeous','fantastic'], 'love'],
-    [['sad','sadness','unhappy','disappointed','let down','sorry','apolog'], 'sadness'],
-    [['scared','fear','afraid','concern','worry','secure','security'], 'fear'],
-    [['surpris','surprised','unexpected','wow','shock','surprise'], 'surprise'],
-    [['happy','great','good','pleased','satisfied','enjoy'], 'joy'],
+    [['angry','furious','outrage','ridiculous','frustrat','hate','broken','ignored','refund','terrible','rude','worst','awful'], 'anger'],
+    [['love','in love','ador','amazing','recommend','delighted','gorgeous','fantastic','romantic','cherish'], 'love'],
+    [['sad','sadness','unhappy','disappointed','let down','sorry','apolog','regret','tear','sadly'], 'sadness'],
+    [['scared','fear','afraid','concern','worry','secure','security','nervous','anxious','panic'], 'fear'],
+    [['surpris','surprised','unexpected','wow','shock','surprise','astonish','amazed'], 'surprise'],
+    [['happy','great','good','pleased','satisfied','enjoy','impress','impressed','grateful','thank','thanks','appreciate','awesome','fantastic'], 'joy'],
   ];
   for (const [words, label] of buckets) {
     for (const w of words) if (t.includes(w)) return { label, score: 0.6, allScores: [{ label, score: 0.6 }] };
