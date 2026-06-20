@@ -283,6 +283,9 @@ export async function POST(req: NextRequest) {
             }
             const fb = fallbackClassify(trimmed.slice(0, 512));
             const cfg = EMOTION_CONFIG[fb.label.toLowerCase()] ?? DEFAULT_CONFIG;
+            // If fallback returns a reasonably confident label, surface it but don't mark analysisError to avoid alarming UI.
+            const FB_CONF_THRESHOLD = 0.35; // 35% confidence
+            const isGoodFallback = fb.label !== 'unknown' && (fb.score ?? 0) >= FB_CONF_THRESHOLD;
             return {
               id: i + idx,
               message: msg,
@@ -290,8 +293,7 @@ export async function POST(req: NextRequest) {
               confidence: Math.round(fb.score * 100),
               allScores: fb.allScores.map(s => ({ label: s.label, score: Math.round(s.score * 100) })),
               ...cfg,
-              analysisError: errMsg,
-              fallback: true,
+              ...(isGoodFallback ? { fallback: true } : { analysisError: errMsg, fallback: true }),
             };
           }
         })
