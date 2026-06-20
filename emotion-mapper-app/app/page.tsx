@@ -413,7 +413,7 @@ function AnalyzeView({ onResults }: { onResults: (r: ApiResponse) => void }) {
   const run = useCallback(async () => {
     const msgs = tab === 'single' ? [text.trim()] : csvRows;
     if (!msgs[0]) { setError('No messages to analyze.'); return; }
-    if (msgs.length > 500) { setError('Max 500 messages per batch.'); return; }
+    if (msgs.length > 1000) { setError('Max 1000 messages per batch.'); return; }
     setError(''); setLoading(true); setProgress(8);
     // generate client id for progress polling
     const clientId = `c_${Date.now().toString(36)}_${Math.floor(Math.random()*10000).toString(36)}`;
@@ -597,12 +597,12 @@ function AnalyzeView({ onResults }: { onResults: (r: ApiResponse) => void }) {
           <div className="card" style={{ padding: 16 }}>
             <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--dim)', marginBottom: 8 }}>Model Info</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5, fontSize: 12, color: 'var(--muted)' }}>
-              {[
+                {[
                 ['Model', 'DistilBERT fine-tuned'],
                 ['Dataset', 'Emotions NLP (6-class)'],
                 ['Provider', 'HuggingFace API'],
                 ['Max input', '512 tokens'],
-                ['Batch limit', '500 messages'],
+                ['Batch limit', '1000 messages'],
               ].map(([k, v]) => (
                 <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                   <span style={{ color: 'var(--dim)' }}>{k}</span>

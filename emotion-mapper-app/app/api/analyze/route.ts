@@ -238,8 +238,8 @@ export async function POST(req: NextRequest) {
     if (!Array.isArray(messages) || messages.length === 0) {
       return NextResponse.json({ error: 'messages array is required and must not be empty.' }, { status: 400 });
     }
-    if (messages.length > 500) {
-      return NextResponse.json({ error: 'Maximum 500 messages per request.' }, { status: 400 });
+    if (messages.length > 1000) {
+      return NextResponse.json({ error: 'Maximum 1000 messages per request.' }, { status: 400 });
     }
 
     const hfToken = process.env.HF_TOKEN ?? '';
