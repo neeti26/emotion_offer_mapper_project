@@ -22,7 +22,7 @@ function fetch(url, opts={}){
 async function run(){
   try{
     const base = process.env.TARGET_URL || 'https://emotion-mapper-app.vercel.app';
-    const csvPath = path.resolve(__dirname, '..', 'sample_100.csv');
+    const csvPath = path.resolve(__dirname, '..', '..', 'sample_100.csv');
     const raw = fs.readFileSync(csvPath, 'utf8');
     const lines = raw.split(/\r?\n/).filter(Boolean);
     // assume header present or not; extract first column values
