@@ -67,6 +67,10 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
   score: number;
   allScores: { label: string; score: number }[];
 }> {
+  // For quick local development or debugging, set SKIP_HF=1 to force keyword fallback immediately.
+  if (process.env.SKIP_HF === '1') {
+    return fallbackClassify(text);
+  }
   // Robust fetch with timeout + retries + smarter fallback
   const url = process.env.HF_API_URL ?? 'https://api-inference.huggingface.co/models/bhadresh-savani/distilbert-base-uncased-emotion';
   const MAX_RETRIES = 5;
