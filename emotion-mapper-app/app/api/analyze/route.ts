@@ -67,13 +67,16 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
   score: number;
   allScores: { label: string; score: number }[];
 }> {
-  // Robust fetch with timeout + retries + simple fallback
-  const url = 'https://api-inference.huggingface.co/models/bhadresh-savani/distilbert-base-uncased-emotion';
-  const MAX_RETRIES = 3;
-  const BASE_DELAY = 400; // ms
+  // Robust fetch with timeout + retries + smarter fallback
+  const url = process.env.HF_API_URL ?? 'https://api-inference.huggingface.co/models/bhadresh-savani/distilbert-base-uncased-emotion';
+  const MAX_RETRIES = 5;
+  const BASE_DELAY = 500; // ms
 
-  // small in-invocation cache to avoid duplicate calls within same request
-  const localCache = (classifyEmotion as any)._cache ||= new Map<string, { label: string; score: number; allScores: { label: string; score: number }[] }>();
+  // small in-memory cache (shared across invocations in this server instance) to avoid duplicate calls
+  const cacheObj = (classifyEmotion as any)._cache ||= { map: new Map<string, { label: string; score: number; allScores: { label: string; score: number }[] }>(), order: [] as string[] };
+  const localCache = cacheObj.map;
+  // cap cache size to avoid unbounded memory growth
+  const CACHE_MAX = 500;
   if (localCache.has(text)) return localCache.get(text)!;
 
   // Try shared Redis cache first (if enabled)
@@ -104,13 +107,16 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000 + attempt * 2000); // increase timeout on retries
+    // progressively increase timeout length on each attempt
+    const timeoutMs = 8000 + (attempt - 1) * 4000;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${hfToken}`,
           'Content-Type': 'application/json',
+          Accept: 'application/json',
         },
         body: JSON.stringify({ inputs: text, parameters: { return_all_scores: true } }),
         signal: controller.signal,
@@ -120,13 +126,19 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
       if (!res.ok) {
         const errBody = await res.text().catch(() => '');
         const status = res.status;
+        // respect Retry-After header if present
+        const ra = res.headers.get?.('retry-after');
+        const retryAfter = ra ? Math.max(0, parseInt(ra, 10) * 1000) : null;
         // retry on transient errors
-        if ([429, 502, 503, 504].includes(status) && attempt < MAX_RETRIES) {
-          const delay = BASE_DELAY * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 200);
+        if (([429, 502, 503, 504].includes(status) || status === 0) && attempt < MAX_RETRIES) {
+          const base = BASE_DELAY * Math.pow(2, attempt - 1);
+          const jitter = Math.floor(Math.random() * 300);
+          const delay = retryAfter ?? (base + jitter);
           console.warn(`[api/analyze] HF transient ${status} (attempt ${attempt}), retrying in ${delay}ms`);
           await sleep(delay);
           continue;
         }
+        console.error('[api/analyze] HF non-retryable response', { status, body: errBody });
         throw new Error(`HF status ${status}: ${errBody}`);
       }
 
@@ -135,7 +147,17 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
       if (!Array.isArray(scores) || scores.length === 0) throw new Error('Invalid HF response');
       scores.sort((a, b) => b.score - a.score);
       const out = { label: scores[0].label, score: scores[0].score, allScores: scores };
-      localCache.set(text, out);
+      // write to in-memory cache (cap size)
+      try {
+        localCache.set(text, out);
+        cacheObj.order.push(text);
+        if (cacheObj.order.length > CACHE_MAX) {
+          const oldest = cacheObj.order.shift();
+          if (oldest) localCache.delete(oldest);
+        }
+      } catch (e) {
+        // ignore cache set errors
+      }
       // store in Redis for shared caching (ttl 1 day) and increment hf call metric
       if (redis) {
         try {
@@ -146,16 +168,25 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
         }
       }
       return out;
-    } catch (err) {
+    } catch (err: unknown) {
       clearTimeout(timeout);
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
       console.error(`[api/analyze] HF attempt ${attempt} failed:`, msg);
-      if (attempt < MAX_RETRIES) {
-        const delay = BASE_DELAY * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 200);
+      // transient network errors: Retry (TypeError often indicates fetch/network failure)
+      const isTransient = typeof msg === 'string' && (
+        msg.includes('AbortError') ||
+        msg.toLowerCase().includes('fetch failed') ||
+        msg.toLowerCase().includes('network') ||
+        msg.toLowerCase().includes('ecconnreset') ||
+        msg.toLowerCase().includes('ecconnrefused') ||
+        msg.toLowerCase().includes('timeout')
+      );
+      if (attempt < MAX_RETRIES && isTransient) {
+        const delay = BASE_DELAY * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 500);
         await sleep(delay);
         continue;
       }
-      // after retries, throw to let caller handle fallback
+      // after retries, rethrow to let caller produce fallback
       throw new Error(msg || 'fetch failed');
     }
   }
