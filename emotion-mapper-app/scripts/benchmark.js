@@ -25,14 +25,27 @@ async function run(){
     const NUM = parseInt(process.env.NUM || '100', 10);
     const file = process.env.FILE || path.resolve(__dirname, '..', '..', 'sample_100.csv');
     const csvPath = path.resolve(file);
-    const raw = fs.readFileSync(csvPath, 'utf8');
+    let raw;
+    try {
+      raw = fs.readFileSync(csvPath, 'utf8');
+    } catch (e) {
+      // fallback: use bundled sample_100.csv and expand to NUM by repeating
+      const samplePath = path.resolve(__dirname, '..', '..', 'sample_100.csv');
+      raw = fs.readFileSync(samplePath, 'utf8');
+      console.warn('Requested file not found; using sample and repeating to reach', NUM);
+    }
     const lines = raw.split(/\r?\n/).filter(Boolean);
     // assume header present or not; extract first column values
     const msgsAll = lines.map(l => {
       const cols = l.split(',');
       return cols.slice(0).join(',').replace(/^\d+/, '').trim();
     }).filter(Boolean);
-    const msgs = msgsAll.slice(0, NUM);
+    // build msgs to requested NUM by repeating sample rows if needed
+    const msgs = [];
+    for (let i = 0; msgs.length < NUM; i++) {
+      const base = msgsAll[i % msgsAll.length] || `message ${i}`;
+      msgs.push(`${base} [#${i+1}]`);
+    }
     console.log('Loaded', msgs.length, 'messages');
 
     const url = `${base.replace(/\/$/,'')}/api/analyze`;
