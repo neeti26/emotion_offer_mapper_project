@@ -66,35 +66,84 @@ async function classifyEmotion(text: string, hfToken: string): Promise<{
   score: number;
   allScores: { label: string; score: number }[];
 }> {
-  const response = await fetch(
-    'https://api-inference.huggingface.co/models/bhadresh-savani/distilbert-base-uncased-emotion',
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${hfToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        inputs: text,
-        parameters: { return_all_scores: true },
-      }),
+  // Robust fetch with timeout + retries + simple fallback
+  const url = 'https://api-inference.huggingface.co/models/bhadresh-savani/distilbert-base-uncased-emotion';
+  const MAX_RETRIES = 3;
+  const BASE_DELAY = 400; // ms
+
+  // small in-invocation cache to avoid duplicate calls within same request
+  const localCache = (classifyEmotion as any)._cache ||= new Map<string, { label: string; score: number; allScores: { label: string; score: number }[] }>();
+  if (localCache.has(text)) return localCache.get(text)!;
+
+  const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000 + attempt * 2000); // increase timeout on retries
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${hfToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ inputs: text, parameters: { return_all_scores: true } }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => '');
+        const status = res.status;
+        // retry on transient errors
+        if ([429, 502, 503, 504].includes(status) && attempt < MAX_RETRIES) {
+          const delay = BASE_DELAY * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 200);
+          console.warn(`[api/analyze] HF transient ${status} (attempt ${attempt}), retrying in ${delay}ms`);
+          await sleep(delay);
+          continue;
+        }
+        throw new Error(`HF status ${status}: ${errBody}`);
+      }
+
+      const data = await res.json();
+      const scores: { label: string; score: number }[] = Array.isArray(data[0]) ? data[0] : data;
+      if (!Array.isArray(scores) || scores.length === 0) throw new Error('Invalid HF response');
+      scores.sort((a, b) => b.score - a.score);
+      const out = { label: scores[0].label, score: scores[0].score, allScores: scores };
+      localCache.set(text, out);
+      return out;
+    } catch (err) {
+      clearTimeout(timeout);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[api/analyze] HF attempt ${attempt} failed:`, msg);
+      if (attempt < MAX_RETRIES) {
+        const delay = BASE_DELAY * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 200);
+        await sleep(delay);
+        continue;
+      }
+      // after retries, throw to let caller handle fallback
+      throw new Error(msg || 'fetch failed');
     }
-  );
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`HuggingFace API error ${response.status}: ${err}`);
   }
+  // unreachable
+  throw new Error('unreachable');
+}
 
-  const data = await response.json();
-
-  // HF returns [[{label, score}, ...]] for batch; [{ label, score}...] for single
-  const scores: { label: string; score: number }[] = Array.isArray(data[0])
-    ? data[0]
-    : data;
-
-  scores.sort((a, b) => b.score - a.score);
-  return { label: scores[0].label, score: scores[0].score, allScores: scores };
+// Simple fallback classifier (keyword-based) used if HF is unavailable.
+function fallbackClassify(text: string) {
+  const t = text.toLowerCase();
+  const buckets: [string[], string][] = [
+    [['angry','furious','outrage','ridiculous','frustrat','hate','broken','ignored','refund'], 'anger'],
+    [['love','in love','ador','amazing','recommend','delighted','gorgeous','fantastic'], 'love'],
+    [['sad','sadness','unhappy','disappointed','let down','sorry','apolog'], 'sadness'],
+    [['scared','fear','afraid','concern','worry','secure','security'], 'fear'],
+    [['surpris','surprised','unexpected','wow','shock','surprise'], 'surprise'],
+    [['happy','great','good','pleased','satisfied','enjoy'], 'joy'],
+  ];
+  for (const [words, label] of buckets) {
+    for (const w of words) if (t.includes(w)) return { label, score: 0.6, allScores: [{ label, score: 0.6 }] };
+  }
+  return { label: 'unknown', score: 0.25, allScores: [] };
 }
 
 /* ── POST /api/analyze ── */
