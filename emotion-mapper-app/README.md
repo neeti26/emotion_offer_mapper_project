@@ -61,6 +61,18 @@ HF_TOKEN = your_huggingface_token_here
 
 Or set it in the Vercel dashboard under **Settings → Environment Variables**.
 
+### Optional: Shared Redis + Telemetry
+
+This project can optionally use a Redis instance for shared caching and simple telemetry counters (`metrics:hf_calls`, `metrics:fallbacks`). Set `REDIS_URL` in your production environment (see `.env.example`).
+
+Recommended: use a managed provider such as Upstash and add `REDIS_URL` to Vercel **Settings → Environment Variables**.
+
+When Redis is configured, the server will:
+- Cache HF responses for 24 hours to reduce inference cost and latency
+- Increment `metrics:hf_calls` each time a HF call result is cached
+- Increment `metrics:fallbacks` each time the local keyword fallback is used
+
+You can view metrics via the included dashboard at `/metrics` or call `GET /api/metrics`.
 ---
 
 ## Local Development
@@ -92,7 +104,9 @@ npm run dev
 {
   "messages": ["I'm really frustrated!", "This product is amazing!"]
 }
-```
+echo "HF_TOKEN=your_token_here" > .env.local
+# (optional) add Redis for local testing
+# echo "REDIS_URL=redis://localhost:6379" >> .env.local
 
 **Response:**
 ```json
@@ -122,6 +136,19 @@ npm run dev
 
 **Limits:** Max 500 messages per request.
 
+### `GET /api/metrics`
+
+Returns lightweight telemetry when Redis is enabled. Response example:
+
+```json
+{
+  "hf_calls": 123,
+  "fallbacks": 4,
+  "redis": true
+}
+```
+
+If Redis is not configured, the endpoint returns `{ redis: false }`.
 ---
 
 ## Emotion → Offer Map
