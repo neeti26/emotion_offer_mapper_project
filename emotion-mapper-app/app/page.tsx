@@ -897,6 +897,14 @@ function AnalystView({ data }: { data: ApiResponse | null }) {
       <Topbar title="Analyst Report" sub={`${data.total} messages · avg confidence ${data.avgConfidence}%`} actions={(
         <>
           <button className="btn btn-secondary" onClick={exportServerCSV}><Download size={14} /> Export CSV</button>
+          <button className="btn btn-secondary" onClick={async ()=>{
+            if (!data) return; try {
+              const res = await fetch('/api/report', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ results: data.results, topN: 25 }) });
+              if (!res.ok) throw new Error('Report export failed');
+              const blob = await res.blob();
+              const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'emotioniq_report.csv' }); a.click();
+            } catch (e) { alert(e instanceof Error ? e.message : 'Export failed'); }
+          }} style={{ marginLeft: 8 }}><FileText size={14} /> Export Report</button>
         </>
       )} />
       <div style={{ padding: 24, flex: 1, overflow: 'auto', display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 18 }}>
