@@ -69,6 +69,7 @@ function Sidebar({ view, setView, total, critical }: {
     { id: 'analyze',   icon: <Inbox size={15} />,        label: 'Analyze',    badge: undefined },
     { id: 'results',   icon: <LayoutDashboard size={15} />, label: 'Results',  badge: total > 0 ? String(total) : undefined },
     { id: 'insights',  icon: <BarChart2 size={15} />,     label: 'Insights',   badge: undefined },
+    { id: 'analyst',   icon: <FileText size={15} />,      label: 'Analyst',    badge: undefined },
   ];
   const alerts = critical > 0 ? [{ id: 'alerts', icon: <AlertTriangle size={15} />, label: 'Critical Alerts', badge: String(critical) }] : [];
 
@@ -855,7 +856,113 @@ export default function Home() {
 
         {view === 'insights' && <InsightsView data={data} />}
         {view === 'alerts' && <AlertsView results={data?.results ?? []} />}
+        {view === 'analyst' && <AnalystView data={data} />}
       </main>
+    </div>
+  );
+}
+
+// ── AnalystView: analyst-focused report and CSV export ───────────────────────
+
+function AnalystView({ data }: { data: ApiResponse | null }) {
+  const exportServerCSV = async () => {
+    if (!data) return;
+    try {
+      const res = await fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ results: data.results }) });
+      if (!res.ok) throw new Error('Export failed');
+      const blob = await res.blob();
+      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'emotioniq_results.csv' });
+      a.click();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Export failed');
+    }
+  };
+
+  if (!data) return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <Topbar title="Analyst Report" sub="Run an analysis to generate an analyst-friendly report" />
+      <div className="empty-state" style={{ flex: 1 }}>
+        <FileText size={28} style={{ opacity: 0.25 }} />
+        <div style={{ fontWeight: 600, color: 'var(--text)' }}>No data</div>
+        <div style={{ fontSize: 12 }}>Run analysis first to populate the report.</div>
+      </div>
+    </div>
+  );
+
+  const perEmotion = Object.entries(data.emotionCounts).map(([k, v]) => ({ emotion: k, count: v, color: data.results.find(r => r.emotion === k)?.color ?? '#6b7280' })).sort((a,b)=>b.count-a.count);
+  const lowConf = data.results.slice().sort((a,b)=>a.confidence - b.confidence).slice(0, 12);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <Topbar title="Analyst Report" sub={`${data.total} messages · avg confidence ${data.avgConfidence}%`} actions={(
+        <>
+          <button className="btn btn-secondary" onClick={exportServerCSV}><Download size={14} /> Export CSV</button>
+        </>
+      )} />
+      <div style={{ padding: 24, flex: 1, overflow: 'auto', display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 18 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div className="card" style={{ padding: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Emotion Distribution</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)' }}>{data.total} messages</div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {perEmotion.map(e => (
+                <div key={e.emotion} style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                  <div style={{ width: 8, height: 8, borderRadius: '50%', background: e.color }} />
+                  <div style={{ flex: 1 }}>{e.emotion}</div>
+                  <div style={{ width: 120 }}>
+                    <div className="conf-bar" style={{ background: 'var(--border)' }}>
+                      <div className="conf-bar-fill" style={{ width: `${Math.round((e.count / data.total) * 100)}%`, background: e.color }} />
+                    </div>
+                  </div>
+                  <div style={{ width: 50, textAlign: 'right', fontFamily: 'monospace', color: 'var(--muted)' }}>{e.count}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="card" style={{ padding: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 8 }}>Low Confidence / Review Items</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {lowConf.map(r => (
+                <div key={r.id} style={{ padding: 8, borderRadius: 6, border: '1px solid var(--border)', display: 'flex', gap: 10, alignItems: 'center' }}>
+                  <div style={{ width: 10, height: 10, borderRadius: '50%', background: r.color }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>&ldquo;{r.message}&rdquo;</div>
+                    <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>{r.emotion} · Confidence: {r.confidence}% · Priority: {r.priority}</div>
+                  </div>
+                  <div style={{ fontFamily: 'monospace', color: 'var(--muted)', width: 48, textAlign: 'right' }}>{r.id + 1}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div className="card" style={{ padding: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 8 }}>Quick Metrics</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <MetricCard label="Total" value={data.total} />
+              <MetricCard label="Avg Conf" value={`${data.avgConfidence}%`} />
+              <MetricCard label="Fallbacks" value={(data.results as any[]).filter((r:any)=>r.fallback).length} />
+              <MetricCard label="Low Conf (<40%)" value={data.results.filter(r=>r.confidence < 40).length} />
+            </div>
+          </div>
+
+          <div className="card" style={{ padding: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 8 }}>Top Actions</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {Object.entries(data.emotionCounts).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([em,count]) => (
+                <div key={em} style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <div style={{ textTransform: 'capitalize' }}>{em}</div>
+                  <div style={{ color: 'var(--muted)' }}>{count} messages</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
